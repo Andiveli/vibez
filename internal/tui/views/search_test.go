@@ -10,6 +10,92 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
+func TestSearchPanesIndependent(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(90, 12)
+	s.SetResults(&provider.SearchResult{Tracks: []provider.Track{{Title: "Song A"}, {Title: "Song B"}}, Artists: []provider.Artist{{Name: "Artist A"}, {Name: "Artist B"}}, Albums: []provider.Album{{Title: "Album A"}, {Title: "Album B"}}, Playlists: []provider.Playlist{{Name: "Hidden"}}}, false, nil)
+	if strings.Contains(s.View(), "Hidden") || !strings.Contains(s.View(), "Artists") {
+		t.Fatal("unexpected search panes", s.View())
+	}
+	s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	s.MovePane("l")
+	if a := s.SelectedArtist(); a == nil || a.Name != "Artist A" {
+		t.Fatalf("artist selection: %v", a)
+	}
+	s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	s.MovePane("j")
+	if a := s.SelectedAlbum(); a == nil || a.Title != "Album A" {
+		t.Fatalf("album selection: %v", a)
+	}
+	s.MovePane("k")
+	if tr := s.SelectedTrack(); tr == nil || tr.Title != "Song B" {
+		t.Fatalf("song position lost: %v", tr)
+	}
+}
+
+func TestSearchPaneLayoutAndMissingCategories(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(80, 20)
+	s.SetResults(&provider.SearchResult{Tracks: []provider.Track{{Title: "A"}}, Artists: []provider.Artist{{Name: "B"}}, Albums: []provider.Album{{Title: "C"}}, Playlists: []provider.Playlist{{Name: "Never"}}}, false, nil)
+	v := s.View()
+	if !strings.Contains(v, "╭") || !strings.Contains(v, "│") || !strings.Contains(v, "A") || !strings.Contains(v, "B") || !strings.Contains(v, "C") || strings.Contains(v, "Never") {
+		t.Fatalf("panes must be bordered and exclude playlists: %q", v)
+	}
+	if len(strings.Split(v, "\n")) > 20 {
+		t.Fatalf("layout exceeds terminal height: %d", len(strings.Split(v, "\n")))
+	}
+	s.SetResults(&provider.SearchResult{Artists: []provider.Artist{{Name: "Alone"}}}, false, nil)
+	if view := s.View(); !strings.Contains(view, "Songs") || !strings.Contains(view, "Artists") || !strings.Contains(view, "Albums") || strings.Count(view, "╭") != 3 {
+		t.Fatalf("all three panes must stay visible when a category has no results: %q", view)
+	}
+	if s.SelectedArtist() == nil {
+		t.Fatal("missing songs should select artist")
+	}
+	s.MovePane("j")
+	if s.SelectedArtist() == nil {
+		t.Fatal("missing panes must be skipped")
+	}
+	s.SetSize(30, 4)
+	if !strings.Contains(s.View(), "Alone") {
+		t.Fatal("narrow terminal must show active pane")
+	}
+	s.SetResults(&provider.SearchResult{}, false, nil)
+	if s.SelectedArtist() != nil || s.SelectedAlbum() != nil || s.SelectedTrack() != nil {
+		t.Fatal("empty results retained selection")
+	}
+	_ = s.View()
+}
+
+func TestSearchPanesScrollAndArtistBack(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(80, 18)
+	s.SetResults(&provider.SearchResult{Tracks: []provider.Track{{Title: "First"}, {Title: "Second"}, {Title: "Third"}, {Title: "Fourth"}}, Artists: []provider.Artist{{ID: "a", Name: "Artist"}}, Albums: []provider.Album{{Title: "Album"}}}, false, nil)
+	for range 3 {
+		s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	if !strings.Contains(s.View(), "Fourth") {
+		t.Fatal("scroll did not expose selected song")
+	}
+	s.MovePane("l")
+	a := s.SelectedArtist()
+	if a == nil {
+		t.Fatal("artist not selected")
+	}
+	s.OpenArtist(*a)
+	s.SetArtistAlbums("a", []provider.Album{{Title: "Artist Album"}}, nil)
+	if !strings.Contains(s.View(), "Artist Album") {
+		t.Fatal("artist detail missing")
+	}
+	s.CloseArtist()
+	if s.SelectedArtist() == nil {
+		t.Fatal("back did not restore artist")
+	}
+	s.MovePane("h")
+	if tr := s.SelectedTrack(); tr == nil || tr.Title != "Fourth" {
+		t.Fatalf("song selection lost: %v", tr)
+	}
+}
+
 // --- searchRow ---
 
 func TestSearchRow_IsItem_Header(t *testing.T) {
@@ -386,14 +472,14 @@ func TestSearch_SetResults_TracksAlbumsPlaylists(t *testing.T) {
 		t.Error("Loading() should be false after SetResults")
 	}
 	v := s.View()
-	if !strings.Contains(v, "Tracks") {
-		t.Errorf("View() should contain Tracks header, got: %q", v)
+	if !strings.Contains(v, "Songs") {
+		t.Errorf("View() should contain Songs header, got: %q", v)
 	}
 	if !strings.Contains(v, "Albums") {
 		t.Errorf("View() should contain Albums header, got: %q", v)
 	}
-	if !strings.Contains(v, "Playlists") {
-		t.Errorf("View() should contain Playlists header, got: %q", v)
+	if strings.Contains(v, "Playlists") {
+		t.Errorf("View() must exclude Playlists, got: %q", v)
 	}
 	if !strings.Contains(v, "Night Owl") {
 		t.Errorf("View() should contain track title, got: %q", v)
@@ -401,14 +487,14 @@ func TestSearch_SetResults_TracksAlbumsPlaylists(t *testing.T) {
 	if !strings.Contains(v, "Chet") {
 		t.Errorf("View() should contain album title, got: %q", v)
 	}
-	if !strings.Contains(v, "Jazz Classics") {
-		t.Errorf("View() should contain playlist name, got: %q", v)
+	if strings.Contains(v, "Jazz Classics") {
+		t.Errorf("View() must exclude playlist name, got: %q", v)
 	}
 	if !strings.Contains(v, "[album]") {
 		t.Errorf("View() should contain [album] tag, got: %q", v)
 	}
-	if !strings.Contains(v, "[playlist]") {
-		t.Errorf("View() should contain [playlist] tag, got: %q", v)
+	if strings.Contains(v, "[playlist]") {
+		t.Errorf("View() must exclude playlist tag, got: %q", v)
 	}
 }
 
@@ -446,11 +532,8 @@ func TestSearch_SetResults_OnlyPlaylists(t *testing.T) {
 	s.SetResults(result, false, nil)
 
 	v := s.View()
-	if !strings.Contains(v, "Playlists") {
-		t.Errorf("View() should contain Playlists header, got: %q", v)
-	}
-	if !strings.Contains(v, "Morning Mix") {
-		t.Errorf("View() should contain playlist name, got: %q", v)
+	if v != "" || s.SelectedPlaylist() != nil {
+		t.Errorf("playlist-only search must be empty, got %q", v)
 	}
 	if strings.Contains(v, "Tracks") {
 		t.Errorf("View() should NOT contain Tracks header when there are no tracks, got: %q", v)
@@ -558,11 +641,8 @@ func TestSearch_SelectedPlaylist_FirstByDefault(t *testing.T) {
 	}, false, nil)
 
 	got := s.SelectedPlaylist()
-	if got == nil {
-		t.Fatal("SelectedPlaylist() returned nil when playlists are present")
-	}
-	if got.Name != "Chill Vibes" {
-		t.Errorf("SelectedPlaylist().Name = %q, want %q", got.Name, "Chill Vibes")
+	if got != nil {
+		t.Fatalf("playlist must not be selectable: %v", got)
 	}
 	if s.SelectedTrack() != nil {
 		t.Error("SelectedTrack() should be nil when a playlist is selected")
@@ -591,8 +671,12 @@ func TestSearch_Navigation_CrossesSectionBoundary(t *testing.T) {
 		t.Fatal("expected track to be selected initially")
 	}
 
-	// One down: should move to the album (crosses the Albums header).
+	// Switch panes; down stays within Songs.
 	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if s.SelectedTrack() == nil {
+		t.Fatal("down left the songs pane")
+	}
+	s.MovePane("j")
 	if s.SelectedAlbum() == nil {
 		t.Fatalf("expected album to be selected after navigating down past the Tracks section")
 	}
@@ -600,8 +684,8 @@ func TestSearch_Navigation_CrossesSectionBoundary(t *testing.T) {
 		t.Errorf("SelectedAlbum().Title = %q, want %q", s.SelectedAlbum().Title, "Only Album")
 	}
 
-	// One up: should go back to the track.
-	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	// Previous pane returns to the track.
+	s.MovePane("k")
 	if s.SelectedTrack() == nil {
 		t.Fatalf("expected track to be re-selected after navigating up")
 	}
@@ -620,9 +704,7 @@ func TestSearch_Navigation_AllThreeSections(t *testing.T) {
 		Albums: []provider.Album{
 			{ID: "a1", Title: "Album One"},
 		},
-		Playlists: []provider.Playlist{
-			{ID: "pl1", Name: "Playlist One"},
-		},
+		Artists: []provider.Artist{{ID: "ar1", Name: "Artist One"}},
 	}, false, nil)
 
 	// Start: track selected.
@@ -630,22 +712,17 @@ func TestSearch_Navigation_AllThreeSections(t *testing.T) {
 		t.Fatal("step 0: expected track")
 	}
 
-	// Step 1: album.
-	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	s.MovePane("l")
+	if s.SelectedArtist() == nil {
+		t.Fatal("expected artist")
+	}
+	s.MovePane("j")
 	if s.SelectedAlbum() == nil {
-		t.Fatal("step 1: expected album")
+		t.Fatal("expected album")
 	}
-
-	// Step 2: playlist.
-	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	if s.SelectedPlaylist() == nil {
-		t.Fatal("step 2: expected playlist")
-	}
-
-	// Step 3: no further — stays on playlist.
-	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	if s.SelectedPlaylist() == nil {
-		t.Fatal("step 3: expected still playlist at end of list")
+	s.MovePane("k")
+	if s.SelectedTrack() == nil {
+		t.Fatal("expected song again")
 	}
 }
 
@@ -710,8 +787,8 @@ func TestSearch_PlaylistWithTrackCount_ShowsCount(t *testing.T) {
 	}, false, nil)
 
 	v := s.View()
-	if !strings.Contains(v, "42 tracks") {
-		t.Errorf("View() should show track count for playlist, got: %q", v)
+	if v != "" {
+		t.Errorf("playlist-only search should be empty, got %q", v)
 	}
 }
 
@@ -744,8 +821,8 @@ func TestSearch_ScrollUp_SectionHeaderRemainsVisible(t *testing.T) {
 		t.Errorf("after scrolling up to first item, scroll = %d, want 0 (header must be visible)", s.scroll)
 	}
 	v := s.View()
-	if !strings.Contains(v, "Tracks") {
-		t.Errorf("section header should be visible after scrolling back to the top, view: %q", v)
+	if !strings.Contains(v, "Songs") {
+		t.Errorf("Songs header should be visible after scrolling back to the top, view: %q", v)
 	}
 }
 
@@ -763,14 +840,9 @@ func TestSearch_ScrollUp_AlbumSectionHeaderRemainsVisible(t *testing.T) {
 		},
 	}, false, nil)
 
-	// Navigate into the Albums section and then scroll down a bit.
-	for range 4 {
-		s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	}
-	// Navigate back up to the first album (index just after the Albums header).
-	for range 2 {
-		s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-	}
+	s.MovePane("j")
+	s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	s.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 
 	v := s.View()
 	if !strings.Contains(v, "Albums") {
@@ -788,19 +860,12 @@ func TestSearch_ColorSeeding_PlaylistsWhenHeaderScrolledPast(t *testing.T) {
 			{Title: "T2", CatalogID: "t2"},
 			{Title: "T3", CatalogID: "t3"},
 		},
-		Playlists: []provider.Playlist{
-			{ID: "pl1", Name: "My Playlist", TrackCount: 5},
-		},
+		Artists: []provider.Artist{{ID: "ar1", Name: "My Artist"}},
 	}, false, nil)
 
-	// Navigate all the way down to the playlist.
-	for range 4 {
-		s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	}
-
-	// The selected item must be the playlist.
-	if s.SelectedPlaylist() == nil {
-		t.Fatal("expected playlist to be selected after navigating down")
+	s.MovePane("l")
+	if s.SelectedArtist() == nil {
+		t.Fatal("expected artist")
 	}
 
 	// View() must render without panic and contain the playlist name.
@@ -808,8 +873,8 @@ func TestSearch_ColorSeeding_PlaylistsWhenHeaderScrolledPast(t *testing.T) {
 	// not the default Tracks amber, even when the Playlists header has
 	// scrolled out of the viewport.)
 	v := s.View()
-	if !strings.Contains(v, "My Playlist") {
-		t.Errorf("playlist name should be visible in the view, got: %q", v)
+	if !strings.Contains(v, "My Artist") {
+		t.Errorf("artist name should be visible in the view, got: %q", v)
 	}
 }
 
@@ -827,10 +892,7 @@ func TestSearch_ColorSeeding_AlbumsWhenHeaderScrolledPast(t *testing.T) {
 		},
 	}, false, nil)
 
-	// Navigate to the album (past all tracks and their header).
-	for range 4 {
-		s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	}
+	s.MovePane("j")
 
 	if s.SelectedAlbum() == nil {
 		t.Fatal("expected album to be selected")
@@ -865,8 +927,8 @@ func TestSearch_SelectedIndex_MixedSections(t *testing.T) {
 	if s.SelectedIndex() != 1 {
 		t.Errorf("after 1 down SelectedIndex = %d, want 1", s.SelectedIndex())
 	}
-	// Item 2 = A1 (crosses the Albums header)
-	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	// Item 2 = A1 (switches to the Albums pane)
+	s.MovePane("j")
 	if s.SelectedIndex() != 2 {
 		t.Errorf("after 2 down SelectedIndex = %d, want 2", s.SelectedIndex())
 	}
@@ -923,9 +985,9 @@ func TestSearch_ArtistsSectionAfterAlbums(t *testing.T) {
 		Playlists: []provider.Playlist{{Name: "Pl"}},
 	}, false, nil)
 	v := s.View()
-	ia, iar, ip := strings.Index(v, "Albums"), strings.Index(v, "Artists"), strings.Index(v, "Playlists")
-	if ia < 0 || iar < ia || ip < iar {
-		t.Errorf("sections out of order (Albums %d, Artists %d, Playlists %d):\n%s", ia, iar, ip, v)
+	ia, iar := strings.Index(v, "Albums"), strings.Index(v, "Artists")
+	if ia < 0 || iar < 0 || iar > ia || strings.Contains(v, "Playlists") {
+		t.Errorf("unexpected panes:\n%s", v)
 	}
 	if !strings.Contains(v, "Some Artist") {
 		t.Errorf("artist row missing:\n%s", v)
@@ -934,7 +996,7 @@ func TestSearch_ArtistsSectionAfterAlbums(t *testing.T) {
 
 func TestSearch_OpenArtistShowsAlbumsThenCloseRestoresCursor(t *testing.T) {
 	s := artistSearch()
-	s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	s.MovePane("l")
 	a := s.SelectedArtist()
 	if a == nil {
 		t.Fatal("cursor should be on the artist after one down")

@@ -35,6 +35,14 @@ import (
 
 type viewMode int
 
+type searchStage int
+
+const (
+	searchInput searchStage = iota
+	searchSuperPane
+	searchPaneItems
+)
+
 const (
 	modeNormal         viewMode = iota
 	modeSearch                  // '/' opens — query accumulates in searchQuery
@@ -353,7 +361,9 @@ type Model struct {
 	// Search accumulation (mode == modeSearch)
 	searchQuery  string
 	searchCursor int // rune index of the cursor within searchQuery
-	searchGen    int // incremented on every keystroke; used to discard stale results
+	searchStage  searchStage
+	searchReturn bool // Esc from playback restores the focused search result
+	searchGen    int  // incremented on every keystroke; used to discard stale results
 
 	// Command accumulation (mode == modeCommand)
 	cmdBuf     string
@@ -1065,6 +1075,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.queueIDs = ids
 			m.queue.SetTracks(m.queueTracks)
 			m.appendLog(fmt.Sprintf("[search] playing %q (%d tracks)", msg.label, len(ids)))
+			m.searchReturn = true
 			m.mode = modeNormal
 			m.playerState.Loading = true
 			m.playerState.Playing = false
@@ -1272,12 +1283,45 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
-	switch k {
-	case "esc":
-		if m.search.InArtist() {
-			m.search.CloseArtist()
+	if k == "esc" && m.search.InArtist() {
+		m.search.CloseArtist()
+		return nil
+	}
+	if m.searchStage == searchSuperPane {
+		switch k {
+		case "esc":
+			m.searchStage = searchInput
+		case "enter":
+			m.searchStage = searchPaneItems
+			m.search.SetPaneFocused(true)
+		case "h", "j", "k", "l", "left", "down", "up", "right":
+			m.search.MovePane(k)
+		}
+		return nil
+	}
+	if m.searchStage == searchPaneItems {
+		switch k {
+		case "esc":
+			m.searchStage = searchSuperPane
+			m.search.SetPaneFocused(false)
+			return nil
+		case "up", "k":
+			_, cmd := m.search.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+			return cmd
+		case "down", "j":
+			_, cmd := m.search.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+			return cmd
+		case "enter", "tab", "shift+tab", "ctrl+r", "ctrl+p", "pgup", "pgdown":
+			// Item actions continue through the existing search handling.
+		default:
 			return nil
 		}
+	} else if k == "enter" {
+		m.searchStage = searchSuperPane
+		return nil
+	}
+	switch k {
+	case "esc":
 		m.mode = modeNormal
 		m.searchQuery = ""
 		m.searchCursor = 0
@@ -1298,6 +1342,7 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 			m.playerState.Playing = false
 			m.playerState.Position = 0
 			m.queue.SetTracks(m.queueTracks)
+			m.searchReturn = true
 			m.mode = modeNormal
 			return m.playerCmd(func(p player.Player) error { return p.SetQueue(m.queueIDs) })
 		}
@@ -2054,6 +2099,16 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		}
 	}
 
+	// Playback launched from search has a one-shot back route to its result.
+	if k == "esc" && m.searchReturn && (m.activePanel < 0 || m.panels[m.activePanel] == m.queue) {
+		m.searchReturn = false
+		m.activePanel = -1
+		m.mode = modeSearch
+		m.searchStage = searchPaneItems
+		m.search.SetPaneFocused(true)
+		return nil
+	}
+
 	// When vibe panel has text-input focus or picker is open, route all keys to it.
 	if m.vibe.IsFocused() || m.vibe.PickerActive() {
 		return m.vibe.Update(msg)
@@ -2356,6 +2411,9 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 	switch k {
 	case "/":
 		m.mode = modeSearch
+		m.searchStage = searchInput
+		m.searchReturn = false
+		m.search.SetPaneFocused(false)
 		m.searchQuery = ""
 		m.searchCursor = 0
 		m.search.SetState(nil, false, nil)
@@ -3792,6 +3850,9 @@ func (m *Model) searchLines(contentW, h int) []string {
 	after := textStyle.Render(string(runes[cur:]))
 
 	inputLine := accent.Render("/") + "  " + before + cursor + after
+	if m.searchStage != searchInput {
+		inputLine = accent.Render("/") + "  " + textStyle.Render(m.searchQuery)
+	}
 	sep := muted.Render(strings.Repeat("─", contentW))
 
 	// Reserve input(1) + sep(1) + footerSep(1) + footer(1) = 4 lines.
@@ -3812,10 +3873,7 @@ func (m *Model) searchLines(contentW, h int) []string {
 	} else if m.search.SelectedPlaylist() != nil {
 		kind = "playlist"
 	}
-	esc := " close"
-	if m.search.InArtist() {
-		esc = " back"
-	}
+	esc := " back"
 	footer := "  " + accent.Render("Enter") + muted.Render(" play "+kind) +
 		"  ·  " + accent.Render("Tab") + muted.Render(" add to queue") +
 		"  ·  " + accent.Render("Shift+Tab") + muted.Render(" play next") +
@@ -3824,6 +3882,14 @@ func (m *Model) searchLines(contentW, h int) []string {
 	if m.search.SelectedArtist() != nil {
 		footer = "  " + accent.Render("Enter") + muted.Render(" open artist") +
 			"  ·  " + accent.Render("Esc") + muted.Render(esc)
+	}
+	if m.searchStage == searchInput {
+		footer = "  " + accent.Render("Enter") + muted.Render(" browse panes") +
+			"  ·  " + accent.Render("Esc") + muted.Render(" close")
+	} else if m.searchStage == searchSuperPane {
+		footer = "  " + accent.Render("h/j/k/l") + muted.Render(" choose pane") +
+			"  ·  " + accent.Render("Enter") + muted.Render(" select") +
+			"  ·  " + accent.Render("Esc") + muted.Render(" edit query")
 	}
 
 	result := append([]string{inputLine, sep}, listLines...)
@@ -3847,6 +3913,10 @@ func (m *Model) statusNavLines(w int) []string {
 		cur := min(m.searchCursor, len(runes))
 		before := styles.Header.Render(string(runes[:cur]))
 		after := styles.Header.Render(string(runes[cur:]))
+		if m.searchStage != searchInput {
+			return []string{styles.ModeSearch.Render("SEARCH") + "  " +
+				accent.Render("/") + styles.Header.Render(m.searchQuery)}
+		}
 		return []string{styles.ModeSearch.Render("SEARCH") + "  " +
 			accent.Render("/") + before + accent.Render("█") + after}
 	case modeCommand:

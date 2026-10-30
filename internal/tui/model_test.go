@@ -706,12 +706,128 @@ func TestWaitForState_ReadsFromChannel(t *testing.T) {
 	}
 }
 
+func TestSearchSuperPaneMotion(t *testing.T) {
+	m := newModel(newMockPlayer())
+	m.mode = modeSearch
+	m.searchQuery = "gracie abrams"
+	m.searchCursor = len([]rune(m.searchQuery))
+	m.search.SetResults(&provider.SearchResult{
+		Tracks:  []provider.Track{{Title: "Song", CatalogID: "song-id"}},
+		Artists: []provider.Artist{{ID: "artist-id", Name: "Gracie Abrams"}, {ID: "other-id", Name: "Other"}},
+		Albums:  []provider.Album{{ID: "album-id", Title: "Album"}},
+	}, false, nil)
+	enter := tea.KeyPressMsg{Code: tea.KeyEnter}
+	if cmd := m.handleSearchKey("enter", enter); cmd != nil || m.mode != modeSearch {
+		t.Fatal("first Enter must enter the search super pane without playing")
+	}
+	m.handleSearchKey("j", tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if m.search.SelectedAlbum() == nil {
+		t.Fatal("j should hover the album pane")
+	}
+	m.handleSearchKey("k", tea.KeyPressMsg{Code: 'k', Text: "k"})
+	if m.search.SelectedTrack() == nil {
+		t.Fatal("k should return to the song pane")
+	}
+	m.handleSearchKey("l", tea.KeyPressMsg{Code: 'l', Text: "l"})
+	if m.search.SelectedArtist() == nil {
+		t.Fatal("l should hover the artist pane")
+	}
+	m.handleSearchKey("h", tea.KeyPressMsg{Code: 'h', Text: "h"})
+	m.handleSearchKey("l", tea.KeyPressMsg{Code: 'l', Text: "l"})
+	if m.searchQuery != "gracie abrams" {
+		t.Fatalf("pane navigation changed the query: %q", m.searchQuery)
+	}
+	if cmd := m.handleSearchKey("enter", enter); cmd != nil {
+		t.Fatal("second Enter must focus the artist pane, not open the artist")
+	}
+	m.handleSearchKey("j", tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if a := m.search.SelectedArtist(); a == nil || a.Name != "Other" {
+		t.Fatalf("j should move within the focused pane, got %v", a)
+	}
+	m.handleSearchKey("k", tea.KeyPressMsg{Code: 'k', Text: "k"})
+	if cmd := m.handleSearchKey("enter", enter); cmd == nil || !m.search.InArtist() {
+		t.Fatal("third Enter must open the artist")
+	}
+	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEsc})
+	if m.search.InArtist() || m.searchStage != searchPaneItems {
+		t.Fatal("Esc from artist must return to its focused pane")
+	}
+	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEsc})
+	if m.searchStage != searchSuperPane {
+		t.Fatal("Esc from pane must return to the super pane")
+	}
+	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEsc})
+	if m.searchStage != searchInput {
+		t.Fatal("Esc from super pane must return to query editing")
+	}
+	m.handleSearchKey("x", tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if m.searchQuery != "gracie abramsx" {
+		t.Fatalf("query could not be edited after returning: %q", m.searchQuery)
+	}
+	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEsc})
+	if m.mode != modeNormal {
+		t.Fatal("Esc from query input must close search")
+	}
+}
+
+func TestSearchPlaybackEscReturnsToResults(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		result    *provider.SearchResult
+		album     bool
+		queueOpen bool
+	}{
+		{name: "song", result: &provider.SearchResult{Tracks: []provider.Track{{Title: "Song", CatalogID: "track-id"}}}},
+		{name: "song with queue open", result: &provider.SearchResult{Tracks: []provider.Track{{Title: "Song", CatalogID: "track-id"}}}, queueOpen: true},
+		{name: "album", result: &provider.SearchResult{Albums: []provider.Album{{ID: "album-id", Title: "Album"}}}, album: true},
+		{name: "album with queue open", result: &provider.SearchResult{Albums: []provider.Album{{ID: "album-id", Title: "Album"}}}, album: true, queueOpen: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModel(newMockPlayer())
+			m.mode = modeSearch
+			m.searchQuery = "artist"
+			m.search.SetResults(tc.result, false, nil)
+			enter := tea.KeyPressMsg{Code: tea.KeyEnter}
+			m.handleSearchKey("enter", enter) // query -> super pane
+			m.handleSearchKey("enter", enter) // super pane -> focused pane
+			cmd := m.handleSearchKey("enter", enter)
+			if cmd == nil {
+				t.Fatal("selecting a result must issue a playback command")
+			}
+			if tc.album {
+				m.Update(searchCollectionTracksMsg{tracks: []provider.Track{{Title: "Album track", CatalogID: "album-track"}}, play: true})
+			}
+			if m.mode != modeNormal {
+				t.Fatal("playback must show the queue view")
+			}
+			if tc.queueOpen {
+				m.handleNormalKey(tea.KeyPressMsg{Code: 'q', Text: "q"}, "q")
+				if m.activePanel < 0 || m.panels[m.activePanel] != m.queue {
+					t.Fatal("queue panel did not open")
+				}
+			}
+			m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+			if m.activePanel >= 0 {
+				t.Fatal("Esc must close the queue panel when restoring search")
+			}
+			if m.mode != modeSearch || m.searchStage != searchPaneItems || m.searchQuery != "artist" {
+				t.Fatalf("Esc did not restore focused search results: mode=%v stage=%v query=%q", m.mode, m.searchStage, m.searchQuery)
+			}
+			if tc.album && m.search.SelectedAlbum() == nil || !tc.album && m.search.SelectedTrack() == nil {
+				t.Fatal("Esc did not preserve the selected result")
+			}
+		})
+	}
+}
+
 // --- Search: Enter opens an artist, Esc steps back out (#164) ---
 
 func TestModel_SearchArtistEnterOpensEscReturns(t *testing.T) {
 	m := newModel(nil)
 	m.mode = modeSearch
 	m.search.SetResults(&provider.SearchResult{Artists: []provider.Artist{{ID: "ar1", Name: "Some Artist"}}}, false, nil)
+	m.searchStage = searchPaneItems
+	m.search.SetPaneFocused(true)
 
 	cmd := m.handleSearchKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil || !m.search.InArtist() {
@@ -728,8 +844,13 @@ func TestModel_SearchArtistEnterOpensEscReturns(t *testing.T) {
 		t.Fatalf("first Esc should go back to the results and stay in search (mode %d)", m.mode)
 	}
 	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.searchStage != searchSuperPane {
+		t.Fatal("second Esc should return to the super pane")
+	}
+	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEscape})
+	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.mode != modeNormal {
-		t.Errorf("second Esc should close search (mode %d)", m.mode)
+		t.Errorf("fourth Esc should close search (mode %d)", m.mode)
 	}
 }
 
@@ -739,8 +860,10 @@ func TestModel_SearchArtistEnterOpensEscReturns(t *testing.T) {
 // SelectedTrack() returns a non-nil result.
 func seedSearchResults(m *Model, tracks ...provider.Track) {
 	m.mode = modeSearch
+	m.searchStage = searchPaneItems
 	m.search.SetSize(80, 20)
 	m.search.SetState(tracks, false, nil)
+	m.search.SetPaneFocused(true)
 }
 
 func TestHandleSearchKey_Enter_CallsSetQueue(t *testing.T) {

@@ -278,13 +278,14 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 
 | Key | Action |
 |-----|--------|
-| *(type)* | Filter results in real time |
-| `↑` / `↓` | Navigate results |
-| `enter` | Play now |
-| `tab` | Add to queue |
+| *(type)* | Filter results while editing the query |
+| `enter` | From query: open the search super pane; from super pane: focus a pane; from focused pane: play song/album or open artist |
+| `h` / `j` / `k` / `l` or arrow keys | Navigate Songs, Artists and Albums in the super pane |
+| `↑` / `↓` or `k` / `j`, `PgUp` / `PgDn` | Navigate within a focused pane; narrow terminals show only the active pane |
+| `esc` | Back one level (from song/album playback → focused result; artist → pane → super pane → query → close search) |
+| `tab` | Add selected song or album to queue from a focused pane |
 | `shift+tab` | Play next (insert after current track) |
 | `ctrl+r` | Start radio seeded by the selected track |
-| `esc` | Close |
 
 ### Library (`l`)
 

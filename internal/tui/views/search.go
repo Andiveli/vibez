@@ -96,16 +96,21 @@ type artistView struct {
 // SearchModel holds search results rendered as a unified multi-section list
 // (Tracks, Albums, Playlists) with keyboard navigation.
 type SearchModel struct {
-	provider provider.Provider
-	results  *provider.SearchResult
-	rows     []searchRow
-	cursor   int // row index of the currently highlighted item
-	scroll   int // index of the first rendered row
-	width    int
-	height   int
-	loading  bool
-	err      error
-	artist   *artistView // non-nil while an artist's albums are shown
+	provider      provider.Provider
+	results       *provider.SearchResult
+	rows          []searchRow
+	cursor        int // row index of the currently highlighted item
+	scroll        int // index of the first rendered row
+	width         int
+	height        int
+	loading       bool
+	err           error
+	artist        *artistView // non-nil while an artist's albums are shown
+	pane          int         // songs, artists, albums
+	paneFocused   bool
+	paneCursor    [3]int
+	paneScroll    [3]int
+	paneRendering bool
 }
 
 func NewSearch(prov provider.Provider) *SearchModel {
@@ -119,15 +124,19 @@ func (m *SearchModel) SetSize(w, h int) {
 	m.height = h
 }
 
-// SetResults updates the model with a full search result (tracks + albums + playlists).
+// SetResults updates the model with songs, artists and albums.
 func (m *SearchModel) SetResults(result *provider.SearchResult, loading bool, err error) {
 	m.artist = nil // a new query leaves the artist behind
 	m.loading = loading
 	m.err = err
 	m.results = result
 	m.rebuildRows()
-	m.cursor = m.advance(-1, 1)
-	m.scroll = 0
+	m.pane, m.paneCursor, m.paneScroll = 0, [3]int{}, [3]int{}
+	for p := 0; p < 3; p++ {
+		if m.selectPane(p) {
+			break
+		}
+	}
 }
 
 // SetState is kept for backward compatibility with callers that only have tracks.
@@ -152,17 +161,10 @@ func (m *SearchModel) rebuildRows() {
 		return
 	}
 	if len(m.results.Tracks) > 0 {
-		m.rows = append(m.rows, searchRow{header: true, label: "Tracks"})
+		m.rows = append(m.rows, searchRow{header: true, label: "Songs"})
 		for i := range m.results.Tracks {
 			t := &m.results.Tracks[i]
 			m.rows = append(m.rows, searchRow{track: t})
-		}
-	}
-	if len(m.results.Albums) > 0 {
-		m.rows = append(m.rows, searchRow{header: true, label: "Albums"})
-		for i := range m.results.Albums {
-			a := &m.results.Albums[i]
-			m.rows = append(m.rows, searchRow{album: a})
 		}
 	}
 	if len(m.results.Artists) > 0 {
@@ -171,13 +173,81 @@ func (m *SearchModel) rebuildRows() {
 			m.rows = append(m.rows, searchRow{artist: &m.results.Artists[i]})
 		}
 	}
-	if len(m.results.Playlists) > 0 {
-		m.rows = append(m.rows, searchRow{header: true, label: "Playlists"})
-		for i := range m.results.Playlists {
-			p := &m.results.Playlists[i]
-			m.rows = append(m.rows, searchRow{playlist: p})
+	if len(m.results.Albums) > 0 {
+		m.rows = append(m.rows, searchRow{header: true, label: "Albums"})
+		for i := range m.results.Albums {
+			m.rows = append(m.rows, searchRow{album: &m.results.Albums[i]})
 		}
 	}
+}
+
+func (m *SearchModel) paneRange(p int) (int, int) {
+	labels := [3]string{"Songs", "Artists", "Albums"}
+	start := -1
+	for i, row := range m.rows {
+		if !row.header {
+			continue
+		}
+		if start >= 0 {
+			return start, i
+		}
+		if row.label == labels[p] {
+			start = i
+		}
+	}
+	if start >= 0 {
+		return start, len(m.rows)
+	}
+	return -1, -1
+}
+
+// SetPaneFocused distinguishes the selected pane from a selected result.
+func (m *SearchModel) SetPaneFocused(focused bool) {
+	m.paneFocused = focused
+}
+
+// MovePane follows the visible grid: Songs | Artists above Albums.
+func (m *SearchModel) MovePane(key string) {
+	target := m.pane
+	switch key {
+	case "h", "left":
+		if m.pane == 1 || m.pane == 2 {
+			target = 0
+		}
+	case "l", "right":
+		if m.pane == 0 || m.pane == 2 {
+			target = 1
+		}
+	case "j", "down":
+		if m.pane != 2 {
+			target = 2
+		}
+	case "k", "up":
+		if m.pane == 2 {
+			target = 0
+		}
+	}
+	if target != m.pane {
+		m.paneCursor[m.pane], m.paneScroll[m.pane] = m.cursor, m.scroll
+		m.selectPane(target)
+	}
+}
+
+func (m *SearchModel) selectPane(p int) bool {
+	start, end := m.paneRange(p)
+	if start < 0 || end-start < 2 {
+		return false
+	}
+	m.pane = p
+	m.cursor = start + 1
+	if m.paneCursor[p] >= start+1 && m.paneCursor[p] < end {
+		m.cursor = m.paneCursor[p]
+	}
+	m.scroll = start
+	if m.paneScroll[p] >= start && m.paneScroll[p] < end {
+		m.scroll = m.paneScroll[p]
+	}
+	return true
 }
 
 // advance returns the index of the next selectable row in direction dir (+1/-1)
@@ -199,6 +269,9 @@ func (m *SearchModel) advance(from, dir int) int {
 // within m.height visual lines.
 func (m *SearchModel) ensureCursorVisible() {
 	h := max(1, m.height)
+	if m.artist == nil && m.width >= 48 && m.height >= 8 {
+		h = max(1, m.height/2-2)
+	}
 	// Cursor is above the scroll window: scroll up to it.
 	if m.cursor < m.scroll {
 		m.scroll = m.cursor
@@ -267,6 +340,7 @@ func (m *SearchModel) SelectedArtist() *provider.Artist {
 // OpenArtist replaces the results with the artist's albums, shown as loading
 // until SetArtistAlbums delivers them.
 func (m *SearchModel) OpenArtist(a provider.Artist) {
+	m.paneCursor[m.pane], m.paneScroll[m.pane] = m.cursor, m.scroll
 	m.artist = &artistView{artist: a, loading: true, cursor: m.cursor, scroll: m.scroll}
 	m.rebuildRows()
 	m.cursor = m.advance(-1, 1)
@@ -322,21 +396,26 @@ func (m *SearchModel) SelectedIndex() int {
 
 // Update handles key navigation (↑ ↓ PgUp PgDn).
 func (m *SearchModel) Update(msg tea.KeyPressMsg) (*SearchModel, tea.Cmd) {
+	old := m.cursor
+	start, end := m.paneRange(m.pane)
+	if m.artist != nil {
+		start, end = 0, len(m.rows)
+	}
 	switch msg.String() {
 	case "up":
-		if prev := m.advance(m.cursor, -1); prev != m.cursor {
+		if prev := m.advance(m.cursor, -1); prev != m.cursor && prev > start {
 			m.cursor = prev
 			m.ensureCursorVisible()
 		}
 	case "down":
-		if next := m.advance(m.cursor, 1); next != m.cursor {
+		if next := m.advance(m.cursor, 1); next != m.cursor && next < end {
 			m.cursor = next
 			m.ensureCursorVisible()
 		}
 	case "pgup":
 		for range 5 {
 			prev := m.advance(m.cursor, -1)
-			if prev == m.cursor {
+			if prev == m.cursor || prev <= start {
 				break
 			}
 			m.cursor = prev
@@ -345,12 +424,15 @@ func (m *SearchModel) Update(msg tea.KeyPressMsg) (*SearchModel, tea.Cmd) {
 	case "pgdown":
 		for range 5 {
 			next := m.advance(m.cursor, 1)
-			if next == m.cursor {
+			if next == m.cursor || next >= end {
 				break
 			}
 			m.cursor = next
 		}
 		m.ensureCursorVisible()
+	}
+	if m.artist == nil && old != m.cursor {
+		m.paneCursor[m.pane], m.paneScroll[m.pane] = m.cursor, m.scroll
 	}
 	return m, nil
 }
@@ -373,6 +455,48 @@ func sectionColor(label string) color.Color {
 
 // View renders the multi-section result list within the allocated height.
 func (m *SearchModel) View() string {
+	if m.artist == nil && !m.paneRendering && !m.loading && m.err == nil && len(m.rows) > 0 {
+		render := func(p, w, h int) string {
+			labels := [3]string{"Songs", "Artists", "Albums"}
+			start, end := m.paneRange(p)
+			content := "  " + labels[p]
+			if start >= 0 {
+				copy := *m
+				copy.paneRendering = true
+				copy.rows = m.rows[start:end]
+				copy.cursor = -1
+				if p == m.pane && m.paneFocused {
+					copy.cursor = m.cursor - start
+				}
+				copy.scroll = 0
+				if m.paneScroll[p] >= start && m.paneScroll[p] < end {
+					copy.scroll = m.paneScroll[p] - start
+				}
+				copy.height, copy.width = max(1, h-2), max(1, w-2)
+				if m.width < 48 || m.height < 8 {
+					copy.height, copy.width = max(1, h), max(1, w)
+				}
+				content = copy.View()
+			}
+			if m.width < 48 || m.height < 8 {
+				return lipgloss.NewStyle().Width(max(1, w)).MaxWidth(max(1, w)).Height(max(1, h)).MaxHeight(max(1, h)).Render(content)
+			}
+			borderColor := styles.ColorMuted
+			if p == m.pane {
+				borderColor = sectionColor(labels[p])
+			}
+			return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(borderColor).Width(max(1, w-2)).MaxWidth(max(1, w-2)).Height(max(1, h-2)).MaxHeight(max(1, h-2)).Render(content)
+		}
+		if m.width < 48 || m.height < 8 {
+			// One pane at a time keeps every result reachable on small terminals.
+			return render(m.pane, max(1, m.width), max(1, m.height))
+		}
+		left := m.width / 2
+		top := max(3, m.height/2)
+		return lipgloss.JoinVertical(lipgloss.Left,
+			lipgloss.JoinHorizontal(lipgloss.Top, render(0, left, top), render(1, m.width-left, top)),
+			render(2, m.width, m.height-top))
+	}
 	if m.loading {
 		return styles.QueueItemMuted.Render("  searching…")
 	}
