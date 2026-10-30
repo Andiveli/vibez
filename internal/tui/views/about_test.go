@@ -10,6 +10,12 @@ import (
 
 func TestAboutModel(t *testing.T) {
 	m := NewAbout()
+	var opened []string
+	stubOpen := func(url string) error {
+		opened = append(opened, url)
+		return nil
+	}
+	m.openURL = stubOpen
 	m.SetSize(80, 20)
 
 	// Test initial View
@@ -37,7 +43,10 @@ func TestAboutModel(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected non-nil command for enter key")
 	}
-	_ = cmd() // run it
+	_ = cmd()
+	if len(opened) != 1 || opened[0] != "https://ko-fi.com/pelpsi" {
+		t.Fatalf("Enter should request the donation URL once, got %v", opened)
+	}
 
 	// Test View after open link status change
 	viewAfter := m.View()
@@ -48,11 +57,15 @@ func TestAboutModel(t *testing.T) {
 
 	// Test Update with d
 	m = NewAbout()
+	m.openURL = stubOpen
 	cmd = m.Update(tea.KeyPressMsg{Text: "d"})
 	if cmd == nil {
 		t.Fatal("expected non-nil command for d key")
 	}
 	_ = cmd()
+	if len(opened) != 2 || opened[1] != "https://ko-fi.com/pelpsi" {
+		t.Fatalf("d should request the donation URL once, got %v", opened)
+	}
 }
 
 var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)

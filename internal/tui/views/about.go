@@ -13,13 +13,14 @@ import (
 
 // AboutModel renders the About & support information.
 type AboutModel struct {
-	width  int
-	height int
-	status string
+	width   int
+	height  int
+	status  string
+	openURL func(string) error
 }
 
 func NewAbout() *AboutModel {
-	return &AboutModel{}
+	return &AboutModel{openURL: openurl.Open}
 }
 
 func (a *AboutModel) SetSize(w, h int) {
@@ -32,7 +33,7 @@ func (a *AboutModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	if k == "enter" || k == "d" {
 		a.status = "✓ Opening donation link..."
 		return func() tea.Msg {
-			_ = openurl.Open("https://ko-fi.com/pelpsi")
+			_ = a.openURL("https://ko-fi.com/pelpsi")
 			return nil
 		}
 	}
